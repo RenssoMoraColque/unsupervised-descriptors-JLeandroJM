@@ -1,7 +1,7 @@
 # Clasificación STL-10 con Fisher Vectors Optimizados
 ## Pipeline No Supervisado + SVM para Hackathon de Descriptores de Imagen
 
-[![Accuracy](https://img.shields.io/badge/Accuracy-~57%25-green)]() [![Dimensión](https://img.shields.io/badge/Dimensión-3840%2F4096-blue)]() [![Restricciones](https://img.shields.io/badge/Restricciones-✓%20Cumplidas-success)]()
+[![Accuracy](https://img.shields.io/badge/Accuracy-~67%25-green)]() [![Dimensión](https://img.shields.io/badge/Dimensión-3840%2F4096-blue)]() [![Restricciones](https://img.shields.io/badge/Restricciones-✓%20Cumplidas-success)]()
 
 ## 1. Descripción del Método
 
