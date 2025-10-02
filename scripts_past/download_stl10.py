@@ -12,7 +12,7 @@ def dir_size(path: Path) -> int:
     for p in path.rglob("*"):
         if p.is_file():
             try: total += p.stat().st_size
-            except OSError: pass
+            except: pass
     return total
 
 def main():

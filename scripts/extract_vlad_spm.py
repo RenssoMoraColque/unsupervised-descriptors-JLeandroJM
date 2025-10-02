@@ -58,47 +58,64 @@ def gray_for_sift(img_pil, use_clahe=False, sigma=0.0):
         g = cv2.GaussianBlur(g, ksize=(0,0), sigmaX=float(sigma), sigmaY=float(sigma))
     return g
 
-# ---------- VLAD (hard) ----------
-def vlad_encode(desc_d, centers):
+# ---------- Fisher Vector encoding ----------
+def fisher_vector_encode(desc_d, gmm):
+    """
+    Codifica descriptores usando Fisher Vector.
+    
+    Args:
+        desc_d: descriptores (N, D)
+        gmm: modelo GMM ya entrenado con atributos:
+             - means_: (K, D) - medias de las gaussianas
+             - covariances_: (K, D) - varianzas diagonales
+             - weights_: (K,) - pesos de cada componente
+    
+    Returns:
+        Fisher Vector normalizado de dimensión 2*K*D
+    """
     if desc_d.size == 0:
-        return np.zeros(centers.shape[0]*centers.shape[1], dtype=np.float32)
-    d2 = ((desc_d[:, None, :] - centers[None, :, :])**2).sum(axis=2)  # (N,K)
-    assign = np.argmin(d2, axis=1)
-    K, D = centers.shape
-    V = np.zeros((K, D), dtype=np.float32)
-    for i, a in enumerate(assign):
-        V[a] += (desc_d[i] - centers[a])
-    # intra -> power -> L2
+        K, D = gmm.means_.shape
+        return np.zeros(2 * K * D, dtype=np.float32)
+    
+    K, D = gmm.means_.shape
+    N = desc_d.shape[0]
+    
+    # Predecir probabilidades posteriores: gamma(i,k) = P(k|x_i)
+    posteriors = gmm.predict_proba(desc_d)  # (N, K)
+    
+    # Inicializar gradientes de primer y segundo orden
+    grad_means = np.zeros((K, D), dtype=np.float32)
+    grad_vars = np.zeros((K, D), dtype=np.float32)
+    
+    # Extraer parámetros del GMM
+    means = gmm.means_.astype(np.float32)  # (K, D)
+    variances = gmm.covariances_.astype(np.float32)  # (K, D) asumiendo diagonal
+    weights = gmm.weights_.astype(np.float32)  # (K,)
+    
+    # Calcular gradientes para cada componente
     for k in range(K):
-        n = np.linalg.norm(V[k]) + 1e-12
-        if n > 0: V[k] /= n
-    V = np.sign(V)*np.sqrt(np.abs(V)+1e-12)
-    V = V.reshape(-1)
-    V /= (np.linalg.norm(V)+1e-12)
-    return V.astype(np.float32)
-
-# ---------- VLAD-k (soft) opcional ----------
-def vlad_encode_soft(desc_d, centers, m=5, temp=1.0):
-    if desc_d.size == 0:
-        return np.zeros(centers.shape[0]*centers.shape[1], dtype=np.float32)
-    d2 = ((desc_d[:, None, :] - centers[None, :, :])**2).sum(axis=2)
-    idx_sorted = np.argsort(d2, axis=1)[:, :m]
-    d2_top = np.take_along_axis(d2, idx_sorted, axis=1)
-    w = np.exp(-d2_top / (2.0*(temp**2) + 1e-12))
-    w /= (w.sum(axis=1, keepdims=True) + 1e-12)
-    K, D = centers.shape
-    V = np.zeros((K, D), dtype=np.float32)
-    for i in range(desc_d.shape[0]):
-        for j in range(m):
-            c = idx_sorted[i, j]
-            V[c] += w[i, j] * (desc_d[i] - centers[c])
-    for k in range(K):
-        n = np.linalg.norm(V[k]) + 1e-12
-        if n > 0: V[k] /= n
-    V = np.sign(V)*np.sqrt(np.abs(V)+1e-12)
-    V = V.reshape(-1)
-    V /= (np.linalg.norm(V)+1e-12)
-    return V.astype(np.float32)
+        # Normalización por peso
+        sqrt_weight = np.sqrt(weights[k]) + 1e-12
+        
+        # Gradiente de primer orden (medias)
+        diff = desc_d - means[k]  # (N, D)
+        weighted_diff = posteriors[:, k:k+1] * diff  # (N, D)
+        grad_means[k] = weighted_diff.sum(axis=0) / (sqrt_weight * np.sqrt(variances[k]) + 1e-12)
+        
+        # Gradiente de segundo orden (varianzas)
+        normalized_diff_sq = (diff ** 2) / (variances[k] + 1e-12)  # (N, D)
+        grad_vars[k] = (posteriors[:, k:k+1] * (normalized_diff_sq - 1)).sum(axis=0) / (sqrt_weight * np.sqrt(2) + 1e-12)
+    
+    # Concatenar ambos gradientes
+    fv = np.concatenate([grad_means.flatten(), grad_vars.flatten()], dtype=np.float32)
+    
+    # Power normalization (mejora resultados empíricamente)
+    fv = np.sign(fv) * np.sqrt(np.abs(fv) + 1e-12)
+    
+    # L2 normalization
+    fv /= (np.linalg.norm(fv) + 1e-12)
+    
+    return fv
 
 # ---------- HSV+LBP global (315 dims) opcional ----------
 def color_lbp_feats(img_pil):
@@ -115,9 +132,9 @@ def color_lbp_feats(img_pil):
     lbp_hist = lbp_hist.astype("float32"); lbp_hist /= (lbp_hist.sum()+1e-12)
     return np.concatenate([hsv_hist, lbp_hist], dtype=np.float32)  # 315
 
-def extract_split_spm(ds, pca, centers, step=6, sizes=(12,16),
+def extract_split_spm(ds, pca, gmm, step=6, sizes=(12,16),
                       limit=None, use_clahe=False, sigma=0.0,
-                      vlad_k=1, temp=1.0, add_colorlbp=False):
+                      add_colorlbp=False):
     import cv2
     sift = cv2.SIFT_create()
     X, Y = [], []
@@ -130,12 +147,13 @@ def extract_split_spm(ds, pca, centers, step=6, sizes=(12,16),
             gray = gray_for_sift(reg, use_clahe, sigma)
             desc = compute_dense_rootsift(gray, sift, step=step, sizes=sizes)
             if desc.shape[0] == 0:
-                V = np.zeros(centers.shape[0]*centers.shape[1], dtype=np.float32)
+                K, D = gmm.means_.shape
+                V = np.zeros(2 * K * D, dtype=np.float32)
             else:
                 desc_p = pca.transform(desc)
-                V = vlad_encode(desc_p, centers) if vlad_k<=1 else vlad_encode_soft(desc_p, centers, m=int(vlad_k), temp=float(temp))
+                V = fisher_vector_encode(desc_p, gmm)
             Vs.append(V)  # cada V ya está normalizado
-        V_concat = np.concatenate(Vs, dtype=np.float32)  # (5 * K*d,)
+        V_concat = np.concatenate(Vs, dtype=np.float32)  # (5 * 2*K*d,)
         # L2 final de todo el vector concatenado
         V_concat /= (np.linalg.norm(V_concat) + 1e-12)
         if add_colorlbp:
@@ -147,19 +165,20 @@ def extract_split_spm(ds, pca, centers, step=6, sizes=(12,16),
 
 def main():
     import argparse
-    ap = argparse.ArgumentParser(description="VLAD + SPM (1x1 + 2x2) para STL-10")
+    ap = argparse.ArgumentParser(description="Fisher Vector + SPM (1x1 + 2x2) para STL-10")
     ap.add_argument("--data_root", type=str, default=None)
     ap.add_argument("--pca_path", type=str, default=None)
-    ap.add_argument("--kmeans_path", type=str, default=None)
+    ap.add_argument("--gmm_path", type=str, default=None, 
+                    help="Ruta al modelo GMM entrenado (.joblib)")
     ap.add_argument("--step", type=int, default=6)
     ap.add_argument("--sizes", type=int, nargs="+", default=[12,16])
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--clahe", action="store_true")
     ap.add_argument("--pre_blur_sigma", type=float, default=0.0)
-    ap.add_argument("--vlad_k", type=int, default=1)
-    ap.add_argument("--soft_temp", type=float, default=1.0)
     ap.add_argument("--add_colorlbp", action="store_true",
-                    help="agrega HSV+LBP global (315 dims) — OJO con 4096")
+                    help="agrega HSV+LBP global (315 dims)")
+    ap.add_argument("--force_high_dim", action="store_true",
+                    help="Permite dimensiones > 4096 (puede afectar rendimiento)")
     args = ap.parse_args()
 
     ROOT = Path(__file__).resolve().parents[1]
@@ -167,38 +186,92 @@ def main():
     ART  = ROOT/"artifacts"
     FEAT = ROOT/"features"; FEAT.mkdir(exist_ok=True)
 
+    # Buscar archivos automáticamente si no se especifican
     pca_path = Path(args.pca_path) if args.pca_path else (ART/"pca_sift24.joblib")
-    km_path  = Path(args.kmeans_path) if args.kmeans_path else (ART/"kmeans_vlad32.joblib")
+    gmm_path = Path(args.gmm_path) if args.gmm_path else (ART/"gmm_fisher32.joblib")
+    
+    # Verificar que existan los archivos
+    if not pca_path.exists():
+        print(f"❌ No se encontró PCA: {pca_path}")
+        print("\n📋 Archivos .joblib disponibles en artifacts/:")
+        for f in sorted(ART.glob("*.joblib")):
+            print(f"   - {f.name}")
+        sys.exit(1)
+    
+    if not gmm_path.exists():
+        print(f"❌ No se encontró GMM: {gmm_path}")
+        print("\n📋 Archivos .joblib disponibles en artifacts/:")
+        for f in sorted(ART.glob("*.joblib")):
+            print(f"   - {f.name}")
+        sys.exit(1)
 
+    print(f"📂 Cargando modelos...")
+    print(f"   PCA: {pca_path.name}")
+    print(f"   GMM: {gmm_path.name}")
+    
     pca = load(pca_path)
-    centers = load(km_path).cluster_centers_
-    base_dim = centers.shape[0]*centers.shape[1]  # K*d
-    spm_dim  = base_dim * 5                       # 1x1 + 2x2
+    gmm = load(gmm_path)
+    
+    K, d = gmm.means_.shape
+    base_dim = 2 * K * d  # Fisher Vector es 2*K*d
+    spm_dim  = base_dim * 5  # 1x1 + 2x2
     total_dim = spm_dim + (315 if args.add_colorlbp else 0)
+    
+    print(f"\n📊 Dimensiones:")
+    print(f"   - Componentes GMM (K): {K}")
+    print(f"   - Dim después de PCA (d): {d}")
+    print(f"   - Dim Fisher Vector por región (2*K*d): {base_dim}")
+    print(f"   - Regiones SPM: 5 (1 global + 4 cuadrantes)")
+    print(f"   - Dim SPM total (5 * 2*K*d): {spm_dim}")
+    if args.add_colorlbp:
+        print(f"   - Color+LBP: 315")
+    print(f"   - Dimensión final: {total_dim}")
+    
+    # Validación de dimensión
     if total_dim > 4096:
-        raise RuntimeError(f"Dim final {total_dim} > 4096. Ajusta K/d o desactiva --add_colorlbp.")
+        if not args.force_high_dim:
+            print(f"\n⚠️  ADVERTENCIA: Dimensión final {total_dim} > 4096")
+            print("\n💡 Opciones para reducir la dimensión:")
+            print(f"   1. Reducir componentes GMM: K={K} → K={K//2} (dim ≈ {total_dim//2})")
+            print(f"   2. Reducir componentes PCA: d={d} → d={d//2} (dim ≈ {total_dim//2})")
+            print(f"   3. Usar SPM más simple (solo 1x1, sin cuadrantes): dim = {base_dim}")
+            print(f"   4. Forzar dimensión alta: --force_high_dim")
+            print("\n📝 Ejemplo con K=16 y d=24:")
+            ejemplo_dim = 2 * 16 * 24 * 5
+            print(f"   python scripts/train_gmm_fisher.py --n_components 16")
+            print(f"   → Dimensión resultante: {ejemplo_dim}")
+            
+            print(f"\n❌ Para continuar con dim={total_dim}, usa: --force_high_dim")
+            sys.exit(1)
+        else:
+            print(f"\n✓ Usando dimensión alta ({total_dim}) con --force_high_dim")
 
     ds_tr = STL10(root=str(DATA), split="train", download=False)
     ds_te = STL10(root=str(DATA), split="test",  download=False)
 
-    print(f"Dim celda (K*d) = {base_dim} ; Dim SPM = {spm_dim} ; Dim total = {total_dim}")
+    print(f"\n🔧 Extrayendo Fisher Vectors...")
+    print(f"   Dataset: STL-10")
+    print(f"   Train: {len(ds_tr)} imágenes")
+    print(f"   Test: {len(ds_te)} imágenes")
 
     Xtr, ytr, t_train, tpi_train = extract_split_spm(
-        ds_tr, pca, centers, step=args.step, sizes=tuple(args.sizes),
+        ds_tr, pca, gmm, step=args.step, sizes=tuple(args.sizes),
         limit=args.limit, use_clahe=args.clahe, sigma=args.pre_blur_sigma,
-        vlad_k=args.vlad_k, temp=args.soft_temp, add_colorlbp=args.add_colorlbp
+        add_colorlbp=args.add_colorlbp
     )
-    np.save(FEAT/"X_train_vlad.npy", Xtr); np.save(FEAT/"y_train.npy", ytr)
-    print(f"[TRAIN] {len(ytr)} imgs | total = {t_train:.2f}s | img = {tpi_train:.4f}s")
+    np.save(FEAT/"X_train_fisher.npy", Xtr); np.save(FEAT/"y_train.npy", ytr)
+    print(f"\n[TRAIN] {len(ytr)} imgs | total = {t_train:.2f}s | img = {tpi_train:.4f}s")
+    print(f"        Shape: {Xtr.shape} | Tamaño: {Xtr.nbytes/(1024*1024):.1f} MB")
 
     Xte, yte, t_test, tpi_test = extract_split_spm(
-        ds_te, pca, centers, step=args.step, sizes=tuple(args.sizes),
+        ds_te, pca, gmm, step=args.step, sizes=tuple(args.sizes),
         limit=args.limit, use_clahe=args.clahe, sigma=args.pre_blur_sigma,
-        vlad_k=args.vlad_k, temp=args.soft_temp, add_colorlbp=args.add_colorlbp
+        add_colorlbp=args.add_colorlbp
     )
-    np.save(FEAT/"X_test_vlad.npy", Xte); np.save(FEAT/"y_test.npy", yte)
+    np.save(FEAT/"X_test_fisher.npy", Xte); np.save(FEAT/"y_test.npy", yte)
     print(f"[TEST ] {len(yte)} imgs | total = {t_test:.2f}s | img = {tpi_test:.4f}s")
-    print("\n✅ Listo. Guardado en 'features/'.")
-
-if __name__ == "__main__":
-    main()
+    print(f"        Shape: {Xte.shape} | Tamaño: {Xte.nbytes/(1024*1024):.1f} MB")
+    
+    print("\n✅ Listo. Fisher Vectors guardados en 'features/'.")
+    print(f"   - X_train_fisher.npy: {Xtr.shape}")
+    print(f"   - X_test_fisher.npy: {Xte.shape}")
