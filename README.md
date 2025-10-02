@@ -162,12 +162,12 @@ ls -la artifacts/ features/
 
 
 ### ⚡ **Eficiencia Temporal**
-- **Extracción SIFT (20k unlabeled)**: ~25 min
-- **Entrenamiento PCA**: ~2 min  
-- **Entrenamiento GMM**: ~8 min
-- **Extracción Fisher (13k train+test)**: ~12 min
-- **Grid Search SVM (25 configs)**: ~15 min
-- **TOTAL pipeline**: ~62 min vs días para deep learning
+- **Extracción SIFT (20k unlabeled)**: ~15 min
+- **Entrenamiento PCA**: ~1 min  
+- **Entrenamiento GMM**: ~2 min
+- **Extracción Fisher (13k train+test)**: ~6 min
+- **Grid Search SVM (25 configs)**: ~8 min
+- **TOTAL pipeline**: ~32 min
 
 
 ### 🔧 **Setup del Entorno**
