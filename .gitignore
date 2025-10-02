@@ -1,0 +1,6 @@
+data/
+artifacts/
+features/
+__pycache__/
+*.pyc
+.venv/
