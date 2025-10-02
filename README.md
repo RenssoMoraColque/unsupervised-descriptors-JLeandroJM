@@ -205,5 +205,9 @@ proyecto/
 └── scripts/                   # Pipeline ejecutable
 ```
 
+## REPOSITORIO
+
+https://github.com/RenssoMoraColque/unsupervised-descriptors-JLeandroJM
+
 
 
